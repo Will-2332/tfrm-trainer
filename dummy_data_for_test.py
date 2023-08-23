@@ -7,29 +7,36 @@ import pandas as pd
 np.random.seed(0)
 
 # Define the number of samples
-num_samples = 1000
+num_samples = 100000
 
 # Define plausible event titles and corresponding locations with weights for realistic distribution
 event_titles_locations = {
-    'Meeting': (['Office', 'Library', 'Conference Room'], 5),
-    'Lunch': (['Cafeteria', 'Office', 'Home', 'Restaurant'], 10),
-    'Project Work': (['Office', 'Library', 'Home', 'Workshop'], 7),
-    'Dinner': (['Cafeteria', 'Home', 'Restaurant'], 10),
-    'Study': (['Library', 'Office', 'Home', 'Study Room'], 6),
-    'Shopping': (['Market', 'Mall', 'Supermarket'], 3),
-    'Reading': (['Home', 'Park', 'Library', 'Bookstore'], 4),
-    'Watching TV': (['Home', 'Lounge'], 8),
-    'Playing Games': (['Home', 'Park', 'Arcade'], 2),
-    'Exercising': (['Gym', 'Park', 'Home', 'Sports Center'], 4),
-    'Sleeping': (['Home', 'Hotel'], 10),
-    'Napping': (['Home', 'Lounge'], 2),
-    'Work': (['Office', 'Home', 'Library', 'Workshop'], 9),
-    'Traveling': (['Airport', 'Train Station', 'Bus Station'], 3),
-    'Cooking': (['Home', 'Cooking Class'], 4),
-    'Hiking': (['Park', 'Mountain', 'Trail'], 2),
-    'Cinema': (['Movie Theater'], 3),
-    'Music': (['Concert Hall', 'Home', 'Park'], 3)
+    'Meeting': (['Canary Wharf', 'The Shard', 'Barbican Centre', 'Home'], 5),
+    'Lunch': (['Borough Market', 'Covent Garden', 'Brick Lane', 'Home'], 10),
+    'Project Work': (['British Library', 'Kings College', 'UCL', 'Home'], 7),
+    'Dinner': (['Soho', 'Shoreditch', 'Camden Town', 'Home'], 10),
+    'Study': (['British Library', 'Imperial College', 'LSE', 'Home'], 6),
+    'Shopping': (['Oxford Street', 'Westfield Stratford', 'King’s Road'], 3),
+    'Reading': (['Hyde Park', 'Hampstead Heath', 'Southbank Centre', 'Home'], 4),
+    'Watching TV': (['Home'], 8),
+    'Playing Games': (['Namco Funscape', 'Four Thieves', 'Home'], 2),
+    'Exercising': (['PureGym', 'The Regent’s Park', 'Virgin Active', 'Home'], 4),
+    'Sleeping': (['Home'], 10),
+    'Napping': (['Home'], 2),
+    'Work': (['City of London', 'Tech City', 'Paddington', 'Home'], 9),
+    'Traveling': (['Heathrow Airport', 'St Pancras International', 'Victoria Station'], 3),
+    'Cooking': (['Home'], 4),
+    'Hiking': (['Greenwich Park', 'Richmond Park'], 2),
+    'Cinema': (['BFI IMAX', 'Electric Cinema'], 3),
+    'Music': (['Royal Albert Hall', 'O2 Academy Brixton', 'Roundhouse'], 3),
+    'Theatre': (['West End', 'National Theatre', 'The Globe'], 3),
+    'Museum Visit': (['British Museum', 'Tate Modern', 'Natural History Museum'], 4),
+    'Date': (['Sky Garden', 'The Shard', 'River Thames Cruise'], 4),
+    'Going Out with Friends': (['Camden Market', 'Covent Garden', 'Southbank Centre'], 6),
+    'Party at Clubs': (['Fabric', 'Ministry of Sound', 'Cargo'], 3)
 }
+
+leisure_activities = ['Reading', 'Watching TV', 'Playing Games', 'Exercising', 'Sleeping', 'Napping', 'Music', 'Date', 'Going Out with Friends', 'Party at Clubs']
 
 # Generate random titles and corresponding locations based on weights
 titles = []
@@ -43,24 +50,41 @@ suggestions = []
 # Generate weighted list of titles
 weighted_titles = [title for title, (locations, weight) in event_titles_locations.items() for _ in range(weight)]
 
+start_dates_list = [(pd.to_datetime('2023-01-01') + pd.to_timedelta(np.random.randint(0, 365), unit='d')) for _ in range(num_samples)]
+
 for _ in range(num_samples):
     title = random.choice(weighted_titles)
     location = random.choice(event_titles_locations[title][0])
     titles.append(title)
     locations.append(location)
-    grades.append(randint(3, 5) if title in ['Reading', 'Watching TV', 'Playing Games', 'Exercising', 'Sleeping', 'Napping', 'Music'] else 0)
-    suggestions.append(1 if title in ['Reading', 'Watching TV', 'Playing Games', 'Exercising', 'Sleeping', 'Napping', 'Music'] else 0)
+    grades.append(randint(3, 5) if title in leisure_activities else 0)
+    suggestions.append(1 if title in leisure_activities else 0)
 
     # Define durations and start times based on activity
-    if title == 'Sleeping':
-        durations.append(pd.to_timedelta(randint(6, 9), unit='h'))
-        start_hours.append(np.random.randint(21, 24))
-    elif title == 'Napping':
+    if title == 'Work':
+        # Ensure work is only on weekdays
+        while start_dates_list[_].weekday() > 4:
+            start_dates_list[_] = start_dates_list[_] + pd.to_timedelta(1, unit='d')
+        durations.append(pd.to_timedelta(randint(7, 9), unit='h'))
+        start_hours.append(np.random.randint(8, 10))
+    elif title == 'Lunch':
+        durations.append(pd.to_timedelta(randint(0, 1), unit='h'))
+        start_hours.append(np.random.randint(12, 14))
+    elif title == 'Dinner':
         durations.append(pd.to_timedelta(randint(1, 2), unit='h'))
-        start_hours.append(np.random.randint(14, 16))
-    elif title == 'Work':
-        durations.append(pd.to_timedelta(randint(6, 9), unit='h'))
-        start_hours.append(np.random.randint(7, 18))
+        start_hours.append(np.random.randint(19, 21))
+    elif title == 'Party at Clubs':
+        durations.append(pd.to_timedelta(randint(3, 5), unit='h'))
+        start_hours.append(np.random.randint(22, 24))
+    elif title == 'Date':
+        durations.append(pd.to_timedelta(randint(2, 4), unit='h'))
+        start_hours.append(np.random.randint(19, 22))
+    elif title == 'Going Out with Friends':
+        durations.append(pd.to_timedelta(randint(2, 5), unit='h'))
+        start_hours.append(np.random.randint(17, 20))
+    elif title == 'Museum Visit':
+        durations.append(pd.to_timedelta(randint(2, 4), unit='h'))
+        start_hours.append(np.random.randint(10, 15))
     else:
         durations.append(pd.to_timedelta(randint(1, 4), unit='h'))
         start_hours.append(np.random.randint(7, 22))
@@ -70,11 +94,10 @@ start_times = pd.to_timedelta(start_hours, unit='h') + pd.to_timedelta(start_min
 durations = pd.to_timedelta(durations)
 end_times = start_times + durations
 end_times = pd.to_timedelta(end_times.total_seconds() % (24 * 60 * 60), unit='s')
-start_dates = pd.to_datetime('2023-01-01') + pd.to_timedelta(np.random.randint(0, 365, num_samples), unit='d')
 start_times_str = pd.Series(start_times).dt.components.apply(lambda x: f"{x.hours:02d}:{x.minutes:02d}:{x.seconds:02d}", axis=1)
 end_times_str = pd.Series(end_times).dt.components.apply(lambda x: f"{x.hours:02d}:{x.minutes:02d}:{x.seconds:02d}", axis=1)
-start_datetimes = pd.to_datetime(pd.Series(start_dates).dt.date.astype(str) + ' ' + start_times_str)
-end_datetimes = pd.to_datetime(pd.Series(start_dates).dt.date.astype(str) + ' ' + end_times_str)
+start_datetimes = pd.to_datetime(pd.Series(start_dates_list).astype(str) + ' ' + start_times_str)
+end_datetimes = pd.to_datetime(pd.Series(start_dates_list).astype(str) + ' ' + end_times_str)
 
 # Create a DataFrame
 df = pd.DataFrame({

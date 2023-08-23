@@ -13,7 +13,7 @@ print("Available GPUs: ", tf.config.list_physical_devices('GPU'))
 
 # Load the data
 print("Loading data...")
-df = pd.read_csv('dummy_calendar_data.csv')
+df = pd.read_csv('dummy_calendar_data.csv.csv')
 
 # Display basic information about the loaded data
 print("Total number of samples:", len(df))
