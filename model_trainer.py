@@ -5,7 +5,7 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 
 # Enable eager execution for immediate evaluation of operations
-tf.config.run_functions_eagerly(True)
+# tf.config.run_functions_eagerly(True)
 
 # Check the version of TensorFlow and available GPUs
 print("TensorFlow Version: ", tf.__version__)
@@ -169,7 +169,8 @@ class ActivityRecommenderModel(tfrs.models.Model):
         print("User embeddings shape:", user_embeddings.shape)
         print("Activity embeddings shape:", activity_embeddings.shape)
 
-        return self.task(targets, tf.sigmoid(tf.reduce_sum(user_embeddings * activity_embeddings, axis=1)))
+        return self.task(targets, tf.sigmoid(tf.reduce_sum(tf.reduce_sum(user_embeddings * activity_embeddings, axis=-1)
+, axis=1)))
 
 # Instantiate and compile the model
 print("Compiling the model...")
