@@ -8,7 +8,7 @@ import pandas as pd
 np.random.seed(0)
 
 # Define the number of samples
-num_samples = 1000
+num_samples = 100000
 
 # Define plausible event titles and corresponding locations
 event_titles_locations = {

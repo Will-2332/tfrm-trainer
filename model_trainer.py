@@ -97,6 +97,8 @@ end_time_normalizer.adapt(train.map(lambda x, _: tf.reshape(x["endTime"], [-1, 1
 
 # Define user and activity models
 print("Defining user and activity models...")
+
+
 class UserModel(tf.keras.Model):
     def __init__(self):
         super().__init__()
@@ -107,17 +109,26 @@ class UserModel(tf.keras.Model):
         self.startTime_embedding = tf.keras.layers.Embedding(input_dim=24, output_dim=16)  # 24 hours in a day
         self.endTime_embedding = tf.keras.layers.Embedding(input_dim=24, output_dim=16)  # 24 hours in a day
         self.flatten = tf.keras.layers.Flatten()
+        self.lstm = tf.keras.layers.LSTM(64)  # Add LSTM layer
 
     def call(self, inputs):
         title_indices = self.title_lookup(inputs["title"])
         startTime_indices = tf.cast(inputs["startTime"] % (60*60*24) // (60*60), tf.int32)  # Extract hour of day
         endTime_indices = tf.cast(inputs["endTime"] % (60*60*24) // (60*60), tf.int32)  # Extract hour of day
 
-        return self.flatten(tf.concat([
+        embeddings = tf.concat([
             self.title_embedding(title_indices),
             self.startTime_embedding(startTime_indices),
             self.endTime_embedding(endTime_indices),
-        ], axis=-1))
+        ], axis=-1)
+
+        # Add a time dimension to the embeddings
+        embeddings = tf.expand_dims(embeddings, 1)
+
+        lstm_output = self.lstm(embeddings)
+        return self.flatten(lstm_output)
+
+
 
 class ActivityModel(tf.keras.Model):
 
@@ -158,6 +169,13 @@ class ActivityRecommenderModel(tfrs.models.Model):
             metrics=[tf.keras.metrics.MeanAbsoluteError()]
         )
 
+    def call(self, inputs):
+        user_features = {name: inputs[name] for name in ["title", "startTime", "endTime"]}
+        activity_features = {name: inputs[name] for name in ["title", "grade"]}
+        user_embeddings = self.user_model(user_features)[:, None]
+        activity_embeddings = self.activity_model(activity_features)[:, None]
+        return tf.sigmoid(tf.reduce_sum(user_embeddings * activity_embeddings, axis=-1))
+
     def compute_loss(self, inputs, training=False):
         features, targets = inputs
         user_features = {name: features[name] for name in ["title", "startTime", "endTime"]}
@@ -169,8 +187,8 @@ class ActivityRecommenderModel(tfrs.models.Model):
         print("User embeddings shape:", user_embeddings.shape)
         print("Activity embeddings shape:", activity_embeddings.shape)
 
-        return self.task(targets, tf.sigmoid(tf.reduce_sum(tf.reduce_sum(user_embeddings * activity_embeddings, axis=-1)
-, axis=1)))
+        return self.task(targets, tf.sigmoid(tf.reduce_sum(user_embeddings * activity_embeddings, axis=-1)))
+
 
 # Instantiate and compile the model
 print("Compiling the model...")
@@ -181,13 +199,30 @@ model.compile(optimizer=tf.keras.optimizers.Adagrad(0.5))
 print("Starting training...")
 history = model.fit(cached_train, epochs=3)
 
+# Custom Training Loop
+print("Defining custom training loop...")
+@tf.function
+def train_step(inputs):
+    with tf.GradientTape() as tape:
+        loss = model.compute_loss(inputs)
+    gradients = tape.gradient(loss, model.trainable_variables)
+    model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+    return loss
+
+# Train the model using the custom training loop
+print("Starting training with custom loop...")
+for epoch in range(3):
+    for batch in cached_train:
+        loss = train_step(batch)
+    print(f"Epoch {epoch + 1}, Loss: {loss.numpy()}")
+
 # Print model summaries
 print("User Model Summary:")
 user_model = UserModel()
 dummy_input = {
-    "title": tf.zeros((1, 1), dtype=tf.string),
-    "startTime": tf.zeros((1, 1), dtype=tf.float32),
-    "endTime": tf.zeros((1, 1), dtype=tf.float32)
+    "title": tf.zeros((1,), dtype=tf.string),  # Adjusted shape
+    "startTime": tf.zeros((1,), dtype=tf.float32),  # Adjusted shape
+    "endTime": tf.zeros((1,), dtype=tf.float32)  # Adjusted shape
 }
 user_model(dummy_input)
 user_model.summary()
@@ -195,8 +230,8 @@ user_model.summary()
 print("Activity Model Summary:")
 activity_model = ActivityModel(grade_normalizer, unique_activity_titles)
 dummy_input_activity = {
-    "title": tf.zeros((1, 1), dtype=tf.string),
-    "grade": tf.zeros((1, 1), dtype=tf.float32)
+    "title": tf.zeros((1,), dtype=tf.string),  # Adjusted shape
+    "grade": tf.zeros((1,), dtype=tf.float32)  # Adjusted shape
 }
 activity_model(dummy_input_activity)
 activity_model.summary()
@@ -207,5 +242,12 @@ evaluation_results = model.evaluate(cached_test, return_dict=True)
 
 # Print evaluation results
 print("Evaluation Results: ", evaluation_results)
+
+# Call the model with a sample input
+for features, labels in cached_train.take(1):
+    model(features)
+
+print("Saving the model...")
+model.save('TFRS_LTSM_model')
 
 print("Done!")
