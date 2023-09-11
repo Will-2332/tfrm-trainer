@@ -57,13 +57,15 @@ dataset_for_prediction = dataset_for_prediction.batch(64).prefetch(tf.data.AUTOT
 predictions = []
 for batch in dataset_for_prediction:
     batch_predictions = model(batch).numpy()
+    print("Shape of batch_predictions:", batch_predictions.shape)  # Debug line
     for i, pred in enumerate(batch_predictions):
+        print("Individual prediction:", pred)  # Debug line
         predictions.append({
             "title": batch["title"].numpy()[i].decode('utf-8'),
             "startTime": pd.to_datetime(batch["startTime"].numpy()[i], unit='s'),
             "endTime": pd.to_datetime(batch["endTime"].numpy()[i], unit='s'),
             "location": location_encoder.get_vocabulary()[batch["location"].numpy()[i]],
-            "probability": pred[0]
+            "probability": pred  # Use pred directly
         })
 
 # Sort the predictions based on probability in descending order
@@ -71,7 +73,8 @@ sorted_predictions = sorted(predictions, key=lambda x: x["probability"], reverse
 
 # Display the top predictions
 print("\nTop Predictions with Highest Probability of Happening:")
-for i, pred in enumerate(sorted_predictions[:1000]):  # Displaying top 10 predictions
+for i, pred in enumerate(sorted_predictions[:10]):  # Displaying top 10 predictions
     print(f"Sample {i + 1}: Title: {pred['title']}, Start Time: {pred['startTime']}, End Time: {pred['endTime']}, Location: {pred['location']}, Probability: {pred['probability']*100:.2f}%")
 
 print("Done!")
+

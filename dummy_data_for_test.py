@@ -99,6 +99,7 @@ end_times_str = pd.Series(end_times).dt.components.apply(lambda x: f"{x.hours:02
 start_datetimes = pd.to_datetime(pd.Series(start_dates_list).astype(str) + ' ' + start_times_str)
 end_datetimes = pd.to_datetime(pd.Series(start_dates_list).astype(str) + ' ' + end_times_str)
 
+
 # Create a DataFrame
 df = pd.DataFrame({
     'title': titles,
@@ -108,6 +109,9 @@ df = pd.DataFrame({
     'grade': grades,
     'suggestion': suggestions
 })
+
+# # Drop rows where the suggestion equals 1
+# df = df[df['suggestion'] != 1]
 
 # Save the DataFrame to a CSV file
 df.to_csv('enhanced_realistic_calendar_data.csv', index=False)

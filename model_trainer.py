@@ -4,16 +4,13 @@ import tensorflow_recommenders as tfrs
 import numpy as np
 from sklearn.model_selection import train_test_split
 
-# Enable eager execution for immediate evaluation of operations
-# tf.config.run_functions_eagerly(True)
-
 # Check the version of TensorFlow and available GPUs
 print("TensorFlow Version: ", tf.__version__)
 print("Available GPUs: ", tf.config.list_physical_devices('GPU'))
 
 # Load the data
 print("Loading data...")
-df = pd.read_csv('dummy_calendar_data.csv.csv')
+df = pd.read_csv('dummy_calendar_data.csv')
 
 # Display basic information about the loaded data
 print("Total number of samples:", len(df))
@@ -41,6 +38,10 @@ location_vocab = sorted(df["location"].unique())
 location_encoder = tf.keras.layers.StringLookup(vocabulary=location_vocab)
 df["location"] = location_encoder(df["location"]).numpy()
 
+# Dataset with only suggestions for the model to use as its default
+df2 = df[df['suggestion'] != 0]
+default_suggestions = df2['suggestion'].unique().tolist()
+
 # Split the data into training and testing sets
 print("Splitting data into train and test sets...")
 train, test = train_test_split(df, test_size=0.2, random_state=42)
@@ -65,8 +66,8 @@ print_shapes(test)
 
 # Shuffle, batch, and prefetch the datasets for better performance during training
 train = train.shuffle(buffer_size=len(train))
-train = train.batch(64, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
-test = test.batch(64, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+train = train.batch(32, drop_remainder=True).prefetch(tf.data.AUTOTUNE)  # Changed batch size to 32
+test = test.batch(32, drop_remainder=True).prefetch(tf.data.AUTOTUNE)  # Changed batch size to 32
 
 # Cache the datasets to speed up subsequent epochs
 print("Preparing the data for training...")
@@ -98,11 +99,9 @@ end_time_normalizer.adapt(train.map(lambda x, _: tf.reshape(x["endTime"], [-1, 1
 # Define user and activity models
 print("Defining user and activity models...")
 
-
 class UserModel(tf.keras.Model):
     def __init__(self):
         super().__init__()
-
         self.title_lookup = tf.keras.layers.experimental.preprocessing.StringLookup(mask_token='')
         self.title_lookup.adapt(unique_activity_titles)
         self.title_embedding = tf.keras.layers.Embedding(len(unique_activity_titles) + 2, 32)
@@ -111,130 +110,87 @@ class UserModel(tf.keras.Model):
         self.flatten = tf.keras.layers.Flatten()
         self.lstm = tf.keras.layers.LSTM(64)  # Add LSTM layer
 
+    def get_config(self):
+        return {}  # Add any arguments that your __init__ method uses here
+
     def call(self, inputs):
         title_indices = self.title_lookup(inputs["title"])
         startTime_indices = tf.cast(inputs["startTime"] % (60*60*24) // (60*60), tf.int32)  # Extract hour of day
         endTime_indices = tf.cast(inputs["endTime"] % (60*60*24) // (60*60), tf.int32)  # Extract hour of day
-
         embeddings = tf.concat([
             self.title_embedding(title_indices),
             self.startTime_embedding(startTime_indices),
             self.endTime_embedding(endTime_indices),
         ], axis=-1)
-
-        # Add a time dimension to the embeddings
         embeddings = tf.expand_dims(embeddings, 1)
-
         lstm_output = self.lstm(embeddings)
         return self.flatten(lstm_output)
 
 
-
 class ActivityModel(tf.keras.Model):
-
     def __init__(self, grade_normalizer, unique_activity_titles):
         super().__init__()
-
-        # Title embedding
-        self.title_lookup = tf.keras.layers.StringLookup(
-            vocabulary=unique_activity_titles, mask_token=None)
-        self.title_embedding = tf.keras.layers.Embedding(
-            len(unique_activity_titles) + 1, 32)
-
-        # Grade processing
+        self.title_lookup = tf.keras.layers.StringLookup(vocabulary=unique_activity_titles, mask_token=None)
+        self.title_embedding = tf.keras.layers.Embedding(len(unique_activity_titles) + 1, 32)
         self.grade_processing = tf.keras.Sequential([
             tf.keras.layers.Dense(32, activation='relu'),
             tf.keras.layers.Dense(32, activation='relu')
         ])
 
+    def get_config(self):
+        return {"grade_normalizer": grade_normalizer, "unique_activity_titles": unique_activity_titles}
+
     def call(self, inputs):
-        # Title
         title = self.title_lookup(inputs["title"])
         title_embed = self.title_embedding(title)
-
-        # Grade
         grade_embed = self.grade_processing(tf.expand_dims(inputs["grade"], axis=-1))
-
-        # Concat
         return tf.concat([title_embed, grade_embed], axis=-1)
 
-# Define the overall model
-print("Defining the overall model...")
+
 class ActivityRecommenderModel(tfrs.models.Model):
-    def __init__(self):
+    def __init__(self, default_suggestions, confidence_threshold=0.75):
         super().__init__()
         self.user_model = UserModel()
         self.activity_model = ActivityModel(grade_normalizer, unique_activity_titles)
+        self.default_suggestions = tf.constant(default_suggestions, dtype=tf.float32)
+        self.confidence_threshold = confidence_threshold
         self.task = tfrs.tasks.Ranking(
             metrics=[tf.keras.metrics.MeanAbsoluteError()]
         )
+
+    def get_config(self):
+        return {"default_suggestions": default_suggestions, "confidence_threshold": 0.75}
 
     def call(self, inputs):
         user_features = {name: inputs[name] for name in ["title", "startTime", "endTime"]}
         activity_features = {name: inputs[name] for name in ["title", "grade"]}
         user_embeddings = self.user_model(user_features)[:, None]
         activity_embeddings = self.activity_model(activity_features)[:, None]
-        return tf.sigmoid(tf.reduce_sum(user_embeddings * activity_embeddings, axis=-1))
+        recommendations = tf.sigmoid(tf.reduce_sum(user_embeddings * activity_embeddings, axis=-1))
+        mean_recommendations = tf.reduce_mean(recommendations)
+        final_recommendations = tf.cond(mean_recommendations < self.confidence_threshold,
+                                        lambda: self.default_suggestions,
+                                        lambda: recommendations)
+        return final_recommendations
 
     def compute_loss(self, inputs, training=False):
         features, targets = inputs
-        user_features = {name: features[name] for name in ["title", "startTime", "endTime"]}
-        activity_features = {name: features[name] for name in ["title", "grade"]}
-        user_embeddings = self.user_model(user_features)[:, None]
-        activity_embeddings = self.activity_model(activity_features)[:, None]
+        predictions = self(features)
+        return self.task(targets, predictions)
 
-        # Print the shapes of the embeddings
-        print("User embeddings shape:", user_embeddings.shape)
-        print("Activity embeddings shape:", activity_embeddings.shape)
-
-        return self.task(targets, tf.sigmoid(tf.reduce_sum(user_embeddings * activity_embeddings, axis=-1)))
 
 
 # Instantiate and compile the model
 print("Compiling the model...")
-model = ActivityRecommenderModel()
-model.compile(optimizer=tf.keras.optimizers.Adagrad(0.5))
+model = ActivityRecommenderModel(default_suggestions)
+model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4))  # Changed learning rate to 1e-4
+
+# Add early stopping
+early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=2)
 
 # Train the model
 print("Starting training...")
-history = model.fit(cached_train, epochs=3)
-
-# Custom Training Loop
-print("Defining custom training loop...")
-@tf.function
-def train_step(inputs):
-    with tf.GradientTape() as tape:
-        loss = model.compute_loss(inputs)
-    gradients = tape.gradient(loss, model.trainable_variables)
-    model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-    return loss
-
-# Train the model using the custom training loop
-print("Starting training with custom loop...")
-for epoch in range(3):
-    for batch in cached_train:
-        loss = train_step(batch)
-    print(f"Epoch {epoch + 1}, Loss: {loss.numpy()}")
-
-# Print model summaries
-print("User Model Summary:")
-user_model = UserModel()
-dummy_input = {
-    "title": tf.zeros((1,), dtype=tf.string),  # Adjusted shape
-    "startTime": tf.zeros((1,), dtype=tf.float32),  # Adjusted shape
-    "endTime": tf.zeros((1,), dtype=tf.float32)  # Adjusted shape
-}
-user_model(dummy_input)
-user_model.summary()
-
-print("Activity Model Summary:")
-activity_model = ActivityModel(grade_normalizer, unique_activity_titles)
-dummy_input_activity = {
-    "title": tf.zeros((1,), dtype=tf.string),  # Adjusted shape
-    "grade": tf.zeros((1,), dtype=tf.float32)  # Adjusted shape
-}
-activity_model(dummy_input_activity)
-activity_model.summary()
+history = model.fit(cached_train, epochs=10, validation_data=cached_test, callbacks=[early_stopping])  # Changed epochs to 10
 
 # Evaluate the model
 print("Evaluating the model...")
@@ -243,10 +199,7 @@ evaluation_results = model.evaluate(cached_test, return_dict=True)
 # Print evaluation results
 print("Evaluation Results: ", evaluation_results)
 
-# Call the model with a sample input
-for features, labels in cached_train.take(1):
-    model(features)
-
+# Save the model
 print("Saving the model...")
 model.save('TFRS_LTSM_model')
 
