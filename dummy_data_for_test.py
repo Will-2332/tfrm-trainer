@@ -7,7 +7,7 @@ import pandas as pd
 np.random.seed(0)
 
 # Define the number of samples
-num_samples = 100000
+num_samples = 10
 
 # Define plausible event titles and corresponding locations with weights for realistic distribution
 event_titles_locations = {
@@ -58,7 +58,7 @@ for _ in range(num_samples):
     titles.append(title)
     locations.append(location)
     grades.append(randint(3, 5) if title in leisure_activities else 0)
-    suggestions.append(1 if title in leisure_activities else 0)
+    suggestions.append(0)
 
     # Define durations and start times based on activity
     if title == 'Work':

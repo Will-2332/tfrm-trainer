@@ -66,8 +66,8 @@ print_shapes(test)
 
 # Shuffle, batch, and prefetch the datasets for better performance during training
 train = train.shuffle(buffer_size=len(train))
-train = train.batch(32, drop_remainder=True).prefetch(tf.data.AUTOTUNE)  # Changed batch size to 32
-test = test.batch(32, drop_remainder=True).prefetch(tf.data.AUTOTUNE)  # Changed batch size to 32
+train = train.batch(64, drop_remainder=True).prefetch(tf.data.AUTOTUNE)  # Changed batch size to 64
+test = test.batch(64, drop_remainder=True).prefetch(tf.data.AUTOTUNE)  # Changed batch size to 64
 
 # Cache the datasets to speed up subsequent epochs
 print("Preparing the data for training...")
@@ -102,6 +102,7 @@ print("Defining user and activity models...")
 class UserModel(tf.keras.Model):
     def __init__(self):
         super().__init__()
+        self.unique_activity_titles = unique_activity_titles
         self.title_lookup = tf.keras.layers.experimental.preprocessing.StringLookup(mask_token='')
         self.title_lookup.adapt(unique_activity_titles)
         self.title_embedding = tf.keras.layers.Embedding(len(unique_activity_titles) + 2, 32)
@@ -111,7 +112,7 @@ class UserModel(tf.keras.Model):
         self.lstm = tf.keras.layers.LSTM(64)  # Add LSTM layer
 
     def get_config(self):
-        return {}  # Add any arguments that your __init__ method uses here
+        return {"unique_activity_titles": self.unique_activity_titles}  # Add any arguments that your __init__ method uses here
 
     def call(self, inputs):
         title_indices = self.title_lookup(inputs["title"])
@@ -130,6 +131,8 @@ class UserModel(tf.keras.Model):
 class ActivityModel(tf.keras.Model):
     def __init__(self, grade_normalizer, unique_activity_titles):
         super().__init__()
+        self.grade_normalizer = grade_normalizer  # Add this line
+        self.unique_activity_titles = unique_activity_titles  # Add this line
         self.title_lookup = tf.keras.layers.StringLookup(vocabulary=unique_activity_titles, mask_token=None)
         self.title_embedding = tf.keras.layers.Embedding(len(unique_activity_titles) + 1, 32)
         self.grade_processing = tf.keras.Sequential([
@@ -138,7 +141,7 @@ class ActivityModel(tf.keras.Model):
         ])
 
     def get_config(self):
-        return {"grade_normalizer": grade_normalizer, "unique_activity_titles": unique_activity_titles}
+        return {"grade_normalizer": self.grade_normalizer, "unique_activity_titles": self.unique_activity_titles}
 
     def call(self, inputs):
         title = self.title_lookup(inputs["title"])
@@ -147,8 +150,9 @@ class ActivityModel(tf.keras.Model):
         return tf.concat([title_embed, grade_embed], axis=-1)
 
 
+
 class ActivityRecommenderModel(tfrs.models.Model):
-    def __init__(self, default_suggestions, confidence_threshold=0.75):
+    def __init__(self, default_suggestions, unique_activity_titles, confidence_threshold=0.75):
         super().__init__()
         self.user_model = UserModel()
         self.activity_model = ActivityModel(grade_normalizer, unique_activity_titles)
@@ -159,30 +163,57 @@ class ActivityRecommenderModel(tfrs.models.Model):
         )
 
     def get_config(self):
-        return {"default_suggestions": default_suggestions, "confidence_threshold": 0.75}
+        return {"default_suggestions": self.default_suggestions.numpy().tolist(),
+                "confidence_threshold": self.confidence_threshold}
 
-    def call(self, inputs):
+    def call(self, inputs, training=True):
         user_features = {name: inputs[name] for name in ["title", "startTime", "endTime"]}
         activity_features = {name: inputs[name] for name in ["title", "grade"]}
         user_embeddings = self.user_model(user_features)[:, None]
         activity_embeddings = self.activity_model(activity_features)[:, None]
         recommendations = tf.sigmoid(tf.reduce_sum(user_embeddings * activity_embeddings, axis=-1))
-        mean_recommendations = tf.reduce_mean(recommendations)
-        final_recommendations = tf.cond(mean_recommendations < self.confidence_threshold,
-                                        lambda: self.default_suggestions,
-                                        lambda: recommendations)
-        return final_recommendations
 
-    def compute_loss(self, inputs, training=False):
+        if not training:  # Only apply this logic during inference
+            # Check if all grades are below 3
+            all_grades_below_3 = tf.reduce_all(inputs['grade'] < 3)
+
+            # Check if dataset is empty
+            is_dataset_empty = tf.equal(tf.size(inputs['grade']), 0)
+
+            # Calculate mean recommendations
+            mean_recommendations = tf.reduce_mean(recommendations)
+
+            def true_fn():
+                return self.default_suggestions
+
+            def false_fn():
+                return tf.cond(
+                    mean_recommendations < self.confidence_threshold,
+                    lambda: self.default_suggestions,
+                    lambda: recommendations
+                )
+
+            # Apply conditions
+            final_recommendations = tf.case([
+                (all_grades_below_3, true_fn),
+                (is_dataset_empty, true_fn),
+            ], default=false_fn)
+
+            return final_recommendations
+
+        else:
+            return recommendations  # Existing logic during training
+
+    def compute_loss(self, inputs, training=True):
         features, targets = inputs
-        predictions = self(features)
+        predictions = self(features, training=training)
         return self.task(targets, predictions)
 
 
 
 # Instantiate and compile the model
 print("Compiling the model...")
-model = ActivityRecommenderModel(default_suggestions)
+model = ActivityRecommenderModel(default_suggestions,unique_activity_titles)
 model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4))  # Changed learning rate to 1e-4
 
 # Add early stopping
