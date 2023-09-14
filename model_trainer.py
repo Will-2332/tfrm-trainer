@@ -156,17 +156,68 @@ class ActivityModel(tf.keras.Model):
 
 
 # ActivityRecommenderModel
+class UserModel(tf.keras.Model):
+    def __init__(self):
+        super().__init__()
+        self.unique_activity_titles = unique_activity_titles
+        self.title_lookup = tf.keras.layers.experimental.preprocessing.StringLookup(mask_token='')
+        self.title_lookup.adapt(unique_activity_titles)
+        self.title_embedding = tf.keras.layers.Embedding(len(unique_activity_titles) + 2, 32)
+        self.startTime_embedding = tf.keras.layers.Embedding(input_dim=24, output_dim=16)  # 24 hours in a day
+        self.endTime_embedding = tf.keras.layers.Embedding(input_dim=24, output_dim=16)  # 24 hours in a day
+        self.flatten = tf.keras.layers.Flatten()
+        self.lstm = tf.keras.layers.LSTM(64)  # Add LSTM layer
+
+    def get_config(self):
+        return {"unique_activity_titles": self.unique_activity_titles}  # Add any arguments that your __init__ method uses here
+
+    def call(self, inputs):
+        title_indices = self.title_lookup(inputs["title"])
+        startTime_indices = tf.cast(inputs["startTime"] % (60*60*24) // (60*60), tf.int32)  # Extract hour of day
+        endTime_indices = tf.cast(inputs["endTime"] % (60*60*24) // (60*60), tf.int32)  # Extract hour of day
+        embeddings = tf.concat([
+            self.title_embedding(title_indices),
+            self.startTime_embedding(startTime_indices),
+            self.endTime_embedding(endTime_indices),
+        ], axis=-1)
+        embeddings = tf.expand_dims(embeddings, 1)
+        lstm_output = self.lstm(embeddings)
+        return self.flatten(lstm_output)
+
+
+class ActivityModel(tf.keras.Model):
+    def __init__(self, grade_normalizer, unique_activity_titles):
+        super().__init__()
+        self.grade_normalizer = grade_normalizer  # Add this line
+        self.unique_activity_titles = unique_activity_titles  # Add this line
+        self.title_lookup = tf.keras.layers.StringLookup(vocabulary=unique_activity_titles, mask_token=None)
+        self.title_embedding = tf.keras.layers.Embedding(len(unique_activity_titles) + 1, 32)
+        self.grade_processing = tf.keras.Sequential([
+            tf.keras.layers.Dense(32, activation='relu'),
+            tf.keras.layers.Dense(32, activation='relu')
+        ])
+
+    def get_config(self):
+        return {"grade_normalizer": self.grade_normalizer, "unique_activity_titles": self.unique_activity_titles}
+
+    def call(self, inputs):
+        title = self.title_lookup(inputs["title"])
+        title_embed = self.title_embedding(title)
+        grade_embed = self.grade_processing(tf.expand_dims(inputs["grade"], axis=-1))
+        return tf.concat([title_embed, grade_embed], axis=-1)
+
+
+
+# ActivityRecommenderModel now accepts pre-trained UserModel and ActivityModel
 class ActivityRecommenderModel(tfrs.models.Model):
     def __init__(self, user_model, activity_model, default_suggestions, confidence_threshold=0.75):
         super().__init__()
-        self.user_model = user_model
-        self.activity_model = activity_model
+        self.user_model = user_model  # Now accepts a pre-trained UserModel
+        self.activity_model = activity_model  # Now accepts a pre-trained ActivityModel
         self.default_suggestions = tf.constant(default_suggestions, dtype=tf.float32)
         self.confidence_threshold = confidence_threshold
         self.task = tfrs.tasks.Ranking(
-            metrics=[
-                tf.keras.metrics.MeanAbsoluteError(),
-                tf.keras.metrics.TopKCategoricalAccuracy(k=3)]
+            metrics=[tf.keras.metrics.MeanAbsoluteError()]
         )
 
     def get_config(self):
@@ -179,8 +230,6 @@ class ActivityRecommenderModel(tfrs.models.Model):
         user_embeddings = self.user_model(user_features)[:, None]
         activity_embeddings = self.activity_model(activity_features)[:, None]
         recommendations = tf.sigmoid(tf.reduce_sum(user_embeddings * activity_embeddings, axis=-1))
-        if len(recommendations.shape) == 1:
-            recommendations = tf.expand_dims(recommendations, axis=-1)
 
         if not training:  # Only apply this logic during inference
             # Check if all grades are below 3
@@ -208,36 +257,14 @@ class ActivityRecommenderModel(tfrs.models.Model):
                 (is_dataset_empty, true_fn),
             ], default=false_fn)
 
-            final_recommendations = tf.cond(tf.equal(tf.rank(final_recommendations), 1),
-                                            lambda: tf.expand_dims(final_recommendations, axis=-1),
-                                            lambda: final_recommendations)
-
             return final_recommendations
 
         else:
-            # Use tf.rank instead of len for recommendations
-            recommendations = tf.cond(tf.equal(tf.rank(recommendations), 1),
-                                      lambda: tf.expand_dims(recommendations, axis=-1),
-                                      lambda: recommendations)
-
-            return recommendations
+            return recommendations  # Existing logic during training
 
     def compute_loss(self, inputs, training=True):
         features, targets = inputs
         predictions = self(features, training=training)
-
-        # Use tf.cond to conditionally expand dimensions
-        targets = tf.cond(tf.equal(tf.rank(targets), 1),
-                          lambda: tf.expand_dims(targets, axis=-1),
-                          lambda: targets)
-
-        predictions = tf.cond(tf.equal(tf.rank(predictions), 1),
-                              lambda: tf.expand_dims(predictions, axis=-1),
-                              lambda: predictions)
-
-        print(f"Targets shape: {targets.shape}")
-        print(f"Predictions shape: {predictions.shape}")
-
         return self.task(targets, predictions)
 
 # Instantiate UserModel and ActivityModel
