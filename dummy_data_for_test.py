@@ -7,7 +7,7 @@ import pandas as pd
 np.random.seed(0)
 
 # Define the number of samples
-num_samples = 10
+num_samples = 1000
 
 # Define plausible event titles and corresponding locations with weights for realistic distribution
 event_titles_locations = {

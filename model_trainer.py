@@ -4,57 +4,59 @@ import tensorflow_recommenders as tfrs
 import numpy as np
 from sklearn.model_selection import train_test_split
 
-# Check the version of TensorFlow and available GPUs
-print("TensorFlow Version: ", tf.__version__)
-print("Available GPUs: ", tf.config.list_physical_devices('GPU'))
+
+# Check TensorFlow version and available GPUs
+print("TensorFlow Version:", tf.__version__)
+print("Available GPUs:", tf.config.list_physical_devices('GPU'))
 
 # Load the data
 print("Loading data...")
 df = pd.read_csv('dummy_calendar_data.csv')
 
 # Display basic information about the loaded data
-print("Total number of samples:", len(df))
-print("Missing values in each column:\n", df.isnull().sum())
-print("First few rows of the DataFrame:\n", df.head())
+print(f"Total number of samples: {len(df)}")
+print(f"Missing values in each column:\n{df.isnull().sum()}")
+print(f"First few rows of the DataFrame:\n{df.head()}")
 
 # Preprocess datetime columns
 print("Preprocessing data...")
 df["startTime"] = pd.to_datetime(df["startTime"])
 df["endTime"] = pd.to_datetime(df["endTime"])
 
-# Extract additional features from datetime columns before converting to timestamps
+# Extract additional features from datetime columns
 df["start_hour"] = df["startTime"].dt.hour
 df["start_weekday"] = df["startTime"].dt.weekday
 df["end_hour"] = df["endTime"].dt.hour
 
-# Convert datetime to timestamps for easier processing in neural networks
+# Convert datetime to timestamps
 df['startTime'] = df['startTime'].apply(lambda x: x.timestamp())
 df['endTime'] = df['endTime'].apply(lambda x: x.timestamp())
 
-# Get the unique activity titles
+# Get unique activity titles
 unique_activity_titles = df["title"].unique().tolist()
 
+# Encode location feature
 location_vocab = sorted(df["location"].unique())
 location_encoder = tf.keras.layers.StringLookup(vocabulary=location_vocab)
 df["location"] = location_encoder(df["location"]).numpy()
 
-# Dataset with only suggestions for the model to use as its default
+# Extract default suggestions
 df2 = df[df['suggestion'] != 0]
 default_suggestions = df2['suggestion'].unique().tolist()
 
-# Split the data into training and testing sets
+# Split data into training and testing sets
 print("Splitting data into train and test sets...")
 train, test = train_test_split(df, test_size=0.2, random_state=42)
 
-# Convert pandas DataFrames to TensorFlow Datasets
+# Convert DataFrames to TensorFlow Datasets
 print("Converting data to TensorFlow Datasets...")
 train_dict = {name: np.array(value) for name, value in train.items()}
 test_dict = {name: np.array(value) for name, value in test.items()}
-
 train = tf.data.Dataset.from_tensor_slices((train_dict, train_dict.pop("suggestion")))
 test = tf.data.Dataset.from_tensor_slices((test_dict, test_dict.pop("suggestion")))
 
-# Display shapes of a few samples from the datasets
+# Display shapes of some samples
+print("Displaying sample shapes...")
 def print_shapes(dataset, num_samples=5):
     for i, (features, label) in enumerate(dataset.take(num_samples)):
         print(f"Sample {i + 1} shapes:")
@@ -64,17 +66,18 @@ def print_shapes(dataset, num_samples=5):
 print_shapes(train)
 print_shapes(test)
 
-# Shuffle, batch, and prefetch the datasets for better performance during training
-train = train.shuffle(buffer_size=len(train))
-train = train.batch(64, drop_remainder=True).prefetch(tf.data.AUTOTUNE)  # Changed batch size to 64
-test = test.batch(64, drop_remainder=True).prefetch(tf.data.AUTOTUNE)  # Changed batch size to 64
+# Shuffle, batch, and prefetch datasets
+print("Shuffling, batching, and prefetching datasets...")
+train = train.shuffle(buffer_size=len(train)).batch(64).prefetch(tf.data.AUTOTUNE)
+test = test.batch(64).prefetch(tf.data.AUTOTUNE)
 
-# Cache the datasets to speed up subsequent epochs
-print("Preparing the data for training...")
+# Cache datasets
+print("Caching datasets...")
 cached_train = train.cache()
 cached_test = test.cache()
 
 # Display batch sizes
+print("Displaying batch sizes...")
 def print_batch_sizes(dataset):
     batch_sizes = [batch[0]['title'].shape[0] for batch in dataset]
     print("Batch sizes:", batch_sizes)
@@ -82,10 +85,10 @@ def print_batch_sizes(dataset):
 print_batch_sizes(cached_train)
 print_batch_sizes(cached_test)
 
-# Check that the dataset isn't empty
-print("Number of batches in train dataset:", len(list(cached_train)))
+# Check dataset size
+print(f"Number of batches in train dataset: {len(list(cached_train))}")
 
-# Normalize 'grade', 'startTime', and 'endTime' features
+# Normalize features
 print("Normalizing features...")
 grade_normalizer = tf.keras.layers.experimental.preprocessing.Normalization()
 grade_normalizer.adapt(train.map(lambda x, _: tf.reshape(x["grade"], [-1, 1])))
@@ -95,6 +98,7 @@ start_time_normalizer.adapt(train.map(lambda x, _: tf.reshape(x["startTime"], [-
 
 end_time_normalizer = tf.keras.layers.experimental.preprocessing.Normalization()
 end_time_normalizer.adapt(train.map(lambda x, _: tf.reshape(x["endTime"], [-1, 1])))
+
 
 # Define user and activity models
 print("Defining user and activity models...")
@@ -151,15 +155,18 @@ class ActivityModel(tf.keras.Model):
 
 
 
+# ActivityRecommenderModel
 class ActivityRecommenderModel(tfrs.models.Model):
-    def __init__(self, default_suggestions, unique_activity_titles, confidence_threshold=0.75):
+    def __init__(self, user_model, activity_model, default_suggestions, confidence_threshold=0.75):
         super().__init__()
-        self.user_model = UserModel()
-        self.activity_model = ActivityModel(grade_normalizer, unique_activity_titles)
+        self.user_model = user_model
+        self.activity_model = activity_model
         self.default_suggestions = tf.constant(default_suggestions, dtype=tf.float32)
         self.confidence_threshold = confidence_threshold
         self.task = tfrs.tasks.Ranking(
-            metrics=[tf.keras.metrics.MeanAbsoluteError()]
+            metrics=[
+                tf.keras.metrics.MeanAbsoluteError(),
+                tf.keras.metrics.TopKCategoricalAccuracy(k=3)]
         )
 
     def get_config(self):
@@ -172,6 +179,8 @@ class ActivityRecommenderModel(tfrs.models.Model):
         user_embeddings = self.user_model(user_features)[:, None]
         activity_embeddings = self.activity_model(activity_features)[:, None]
         recommendations = tf.sigmoid(tf.reduce_sum(user_embeddings * activity_embeddings, axis=-1))
+        if len(recommendations.shape) == 1:
+            recommendations = tf.expand_dims(recommendations, axis=-1)
 
         if not training:  # Only apply this logic during inference
             # Check if all grades are below 3
@@ -199,22 +208,46 @@ class ActivityRecommenderModel(tfrs.models.Model):
                 (is_dataset_empty, true_fn),
             ], default=false_fn)
 
+            final_recommendations = tf.cond(tf.equal(tf.rank(final_recommendations), 1),
+                                            lambda: tf.expand_dims(final_recommendations, axis=-1),
+                                            lambda: final_recommendations)
+
             return final_recommendations
 
         else:
-            return recommendations  # Existing logic during training
+            # Use tf.rank instead of len for recommendations
+            recommendations = tf.cond(tf.equal(tf.rank(recommendations), 1),
+                                      lambda: tf.expand_dims(recommendations, axis=-1),
+                                      lambda: recommendations)
+
+            return recommendations
 
     def compute_loss(self, inputs, training=True):
         features, targets = inputs
         predictions = self(features, training=training)
+
+        # Use tf.cond to conditionally expand dimensions
+        targets = tf.cond(tf.equal(tf.rank(targets), 1),
+                          lambda: tf.expand_dims(targets, axis=-1),
+                          lambda: targets)
+
+        predictions = tf.cond(tf.equal(tf.rank(predictions), 1),
+                              lambda: tf.expand_dims(predictions, axis=-1),
+                              lambda: predictions)
+
+        print(f"Targets shape: {targets.shape}")
+        print(f"Predictions shape: {predictions.shape}")
+
         return self.task(targets, predictions)
 
+# Instantiate UserModel and ActivityModel
+user_model = UserModel()
+activity_model = ActivityModel(grade_normalizer, unique_activity_titles)
 
-
-# Instantiate and compile the model
+# Instantiate and compile the ActivityRecommenderModel
 print("Compiling the model...")
-model = ActivityRecommenderModel(default_suggestions,unique_activity_titles)
-model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4))  # Changed learning rate to 1e-4
+model = ActivityRecommenderModel(user_model, activity_model, default_suggestions, confidence_threshold=0.75)
+model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4))
 
 # Add early stopping
 early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=2)
@@ -232,6 +265,6 @@ print("Evaluation Results: ", evaluation_results)
 
 # Save the model
 print("Saving the model...")
-model.save('TFRS_LTSM_model')
+model.save('TFRS_LTSM_model', save_format='tf', save_traces=True)
 
 print("Done!")
