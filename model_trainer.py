@@ -59,17 +59,27 @@ train = tf.data.Dataset.from_tensor_slices((train_dict, train_dict.pop("suggesti
 test = tf.data.Dataset.from_tensor_slices((test_dict, test_dict.pop("suggestion")))
 
 # Display shapes of a single sample
-print("Displaying shapes of a single sample...")
+print("Displaying shapes of a single sample each...")
 
+for features, label in train.take(1):
+    print("Sample shapes train:")
+    for key, value in features.items():
+        print(f"{key}: {value.shape}")
 
-def print_single_sample_shape(dataset):
-    for features, label in dataset.take(1):
-        print("Sample shapes:")
-        for key, value in features.items():
-            print(f"{key}: {value.shape}")
+for features, label in test.take(1):
+    print("Sample shapes test:")
+    for key, value in features.items():
+        print(f"{key}: {value.shape}")
 
+for features, label in train_user.take(1):
+    print("Sample shapes train_user:")
+    for key, value in features.items():
+        print(f"{key}: {value.shape}")
 
-print_single_sample_shape(train)
+for features, label in test_user.take(1):
+    print("Sample shapes test_user:")
+    for key, value in features.items():
+        print(f"{key}: {value.shape}")
 
 # For the main training set
 train = train.shuffle(buffer_size=len(train))
@@ -88,21 +98,29 @@ test_user = test_user.batch(64, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
 print("Caching datasets...")
 cached_train = train.cache()
 cached_test = test.cache()
+cached_train_user = train_user.cache()
+cached_test_user = test_user.cache()
 
 # Display batch sizes
 print("Displaying batch sizes...")
 
+batch_sizes_train = [batch[0]['title'].shape[0] for batch in cached_train_user]
+print("Batch sizes for UserModel train:", batch_sizes_train)
 
-def print_batch_sizes(dataset):
-    batch_sizes = [batch[0]['title'].shape[0] for batch in dataset]
-    print("Batch sizes:", batch_sizes)
+batch_sizes_test = [batch[0]['title'].shape[0] for batch in cached_test_user]
+print("Batch sizes for UserModel test:", batch_sizes_test)
 
+batch_sizes_train = [batch[0]['title'].shape[0] for batch in cached_train]
+print("Batch sizes for ActivityModel train:", batch_sizes_train)
 
-print_batch_sizes(cached_train)
-print_batch_sizes(cached_test)
+batch_sizes_test = [batch[0]['title'].shape[0] for batch in cached_test]
+print("Batch sizes for ActivityModel test:", batch_sizes_test)
 
 # Check dataset size
-print(f"Number of batches in train dataset: {len(list(cached_train))}")
+print(f"Number of batches in UserModel train dataset: {len(list(cached_train_user))}")
+print(f"Number of batches in UserModel test dataset: {len(list(cached_test_user))}")
+print(f"Number of batches in ActivityModel train dataset: {len(list(cached_train))}")
+print(f"Number of batches in ActivityModel test dataset: {len(list(cached_test))}")
 
 # Define user and activity models
 print("Defining user and activity models...")
@@ -131,7 +149,6 @@ class UserModel(tf.keras.Model):
                 "unique_locations": self.unique_location}  # Add any arguments that your __init__ method uses here
 
     def call(self, inputs):
-        print("UserModel call method invoked.")
         title_indices = self.title_lookup(inputs["title"])
         startTime_indices = tf.cast(inputs["startTime"] % (60 * 60 * 24) // (60 * 60), tf.int32)
         endTime_indices = tf.cast(inputs["endTime"] % (60 * 60 * 24) // (60 * 60), tf.int32)
@@ -167,7 +184,6 @@ class ActivityModel(tf.keras.Model):
         ])
 
     def call(self, inputs):
-        print("ActivityModel call method invoked.")
         title = self.title_lookup(inputs["title"])
         title_embed = self.title_embedding(title)
         grade_embed = self.grade_processing(tf.expand_dims(inputs["grade"], axis=-1))
@@ -177,6 +193,7 @@ class ActivityModel(tf.keras.Model):
         embeddings = tf.concat([title_embed, grade_embed, location_embeddings], axis=-1)
 
         return embeddings
+
 
 # ActivityRecommenderModel now accepts pre-trained UserModel and ActivityModel
 class ActivityRecommenderModel(tfrs.models.Model):
@@ -196,20 +213,17 @@ class ActivityRecommenderModel(tfrs.models.Model):
                 "confidence_threshold": self.confidence_threshold}
 
     def call(self, inputs, training=True):
-        print("ActivityRecommenderModel call method invoked.")
-        user_features = user_features = {
+        # Common features for both user and activity models
+        common_features = {
             "title": inputs["title"],
             "startTime": inputs["startTime"],
             "endTime": inputs["endTime"],
-            "location": inputs["location"]
+            "location": inputs["location"],
+            "grade": inputs["grade"]
         }
-        activity_features = {
-            "title": inputs["title"],
-            "grade": inputs["grade"],
-            "location": inputs["location"]
-        }
-        user_embeddings = self.user_model(user_features)[:, None]
-        activity_embeddings = self.activity_model(activity_features)[:, None]
+
+        user_embeddings = self.user_model(common_features)[:, None]
+        activity_embeddings = self.activity_model(common_features)[:, None]
         concat = tf.concat([user_embeddings, activity_embeddings], axis=-1)  # [64, 1, 160]
         recommendations = tf.sigmoid(tf.reduce_sum(concat, axis=-1))
 
@@ -267,6 +281,7 @@ print("UserModel training complete.")
 print("Compiling the ActivityModel...")
 activity_model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
                        loss=tf.keras.losses.MeanSquaredError())
+
 print("Training ActivityModel...")
 activity_model.fit(train, epochs=10, validation_data=test)
 print("ActivityModel training complete.")
@@ -297,3 +312,7 @@ print(f"Evaluation Results: {evaluation_results}")
 print("Saving the ActivityRecommenderModel...")
 model.save('TFRS_LTSM_model', save_format='tf', save_traces=True)
 print("Model saved. Done!")
+
+print("Loading the saved model...")
+loaded_model = tf.keras.models.load_model('TFRS_LTSM_model')
+print("Model loaded successfully.")
