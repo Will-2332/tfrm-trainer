@@ -58,7 +58,8 @@ for _ in range(num_samples):
     titles.append(title)
     locations.append(location)
     grades.append(randint(3, 5) if title in leisure_activities else 0)
-    suggestions.append(0)
+    if title in leisure_activities: suggestions.append(1)
+    else: suggestions.append(0)
 
     # Define durations and start times based on activity
     if title == 'Work':

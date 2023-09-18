@@ -3,6 +3,7 @@ import tensorflow as tf
 import tensorflow_recommenders as tfrs
 import numpy as np
 from sklearn.model_selection import train_test_split
+from tensorflow_recommenders.metrics import FactorizedTopK
 
 # Check TensorFlow version and available GPUs
 print("TensorFlow Version:", tf.__version__)
@@ -132,21 +133,24 @@ class UserModel(tf.keras.Model):
         super().__init__()
         self.unique_activity_titles = unique_activity_titles
         self.title_lookup = tf.keras.layers.experimental.preprocessing.StringLookup(vocabulary=unique_activity_titles,
-                                                                                    mask_token=None)
+                                                                                    mask_token=None,
+                                                                                    oov_token="UNKNOWN")
         self.title_embedding = tf.keras.layers.Embedding(len(unique_activity_titles) + 2, 32)
         self.unique_location = unique_locations
         self.location_lookup = tf.keras.layers.experimental.preprocessing.StringLookup(vocabulary=unique_locations,
-                                                                                       mask_token=None)
+                                                                                       mask_token=None,
+                                                                                       oov_token="UNKNOWN")
         self.location_embedding = tf.keras.layers.Embedding(len(unique_locations) + 2, 32)
         self.startTime_embedding = tf.keras.layers.Embedding(input_dim=24, output_dim=16)
         self.endTime_embedding = tf.keras.layers.Embedding(input_dim=24, output_dim=16)
         self.flatten = tf.keras.layers.Flatten()
-        self.lstm = tf.keras.layers.LSTM(64)
+        self.lstm = tf.keras.layers.LSTM(64, return_sequences=True)
 
-        def get_config(self):
-            return {
-                "unique_activity_titles": self.unique_activity_titles,
-                "unique_locations": self.unique_location}  # Add any arguments that your __init__ method uses here
+    def get_config(self):
+        return {
+            "unique_activity_titles": self.unique_activity_titles,
+            "unique_locations": self.unique_location
+        }
 
     def call(self, inputs):
         title_indices = self.title_lookup(inputs["title"])
@@ -162,8 +166,15 @@ class UserModel(tf.keras.Model):
             location_embeddings,
         ], axis=-1)
 
-        embeddings = tf.expand_dims(embeddings, 1)
-        lstm_output = self.lstm(embeddings)
+        # Sort by startTime
+        sorted_indices = tf.argsort(startTime_indices, axis=-1, direction='ASCENDING')
+        sorted_embeddings = tf.gather(embeddings, sorted_indices)
+
+        sorted_embeddings = tf.expand_dims(sorted_embeddings, 1)
+
+        # Pass through LSTM
+        lstm_output = self.lstm(sorted_embeddings)
+
         return self.flatten(lstm_output)
 
 
@@ -172,21 +183,26 @@ class ActivityModel(tf.keras.Model):
         print("Initializing ActivityModel...")
         super().__init__()
         self.unique_activity_titles = unique_activity_titles
-        self.title_lookup = tf.keras.layers.StringLookup(vocabulary=unique_activity_titles, mask_token=None)
+        self.title_lookup = tf.keras.layers.StringLookup(vocabulary=unique_activity_titles, mask_token=None,
+                                                         oov_token="UNKNOWN")
         self.title_embedding = tf.keras.layers.Embedding(len(unique_activity_titles) + 1, 32)
         self.unique_location = unique_locations
         self.location_lookup = tf.keras.layers.experimental.preprocessing.StringLookup(vocabulary=unique_locations,
-                                                                                       mask_token=None)
-        self.location_embedding = tf.keras.layers.Embedding(len(unique_locations) + 2, 32)
-        self.grade_processing = tf.keras.Sequential([
-            tf.keras.layers.Dense(32, activation='relu'),
-            tf.keras.layers.Dense(32, activation='relu')
-        ])
+                                                                                       mask_token=None,
+                                                                                       oov_token="UNKNOWN")
+        self.location_embedding = tf.keras.layers.Embedding(len(unique_locations) + 2, 31)
+
+    def get_config(self):
+        return {
+            "unique_activity_titles": self.unique_activity_titles,
+            "unique_locations": self.unique_location
+        }
 
     def call(self, inputs):
         title = self.title_lookup(inputs["title"])
         title_embed = self.title_embedding(title)
-        grade_embed = self.grade_processing(tf.expand_dims(inputs["grade"], axis=-1))
+        grade_embed = tf.expand_dims(inputs["grade"], axis=-1)
+        grade_embed = tf.cast(grade_embed, dtype=tf.float32)
         location_indices = self.location_lookup(inputs["location"])
         location_embeddings = self.location_embedding(location_indices)
 
@@ -197,6 +213,7 @@ class ActivityModel(tf.keras.Model):
 
 # ActivityRecommenderModel now accepts pre-trained UserModel and ActivityModel
 class ActivityRecommenderModel(tfrs.models.Model):
+
     def __init__(self, user_model, activity_model, default_suggestions, confidence_threshold=0.75):
         print("Initializing ActivityRecommenderModel...")
         super().__init__()
@@ -204,8 +221,12 @@ class ActivityRecommenderModel(tfrs.models.Model):
         self.activity_model = activity_model  # Now accepts a pre-trained ActivityModel
         self.default_suggestions = tf.constant(default_suggestions, dtype=tf.float32)
         self.confidence_threshold = confidence_threshold
+        self.attention_layer = tf.keras.layers.Attention(use_scale=True)
+        self.dense_layer = tf.keras.layers.Dense(64, activation='relu')
         self.task = tfrs.tasks.Ranking(
-            metrics=[tf.keras.metrics.MeanAbsoluteError()]
+            metrics=[tf.keras.metrics.MeanAbsoluteError()
+                     # ,FactorizedTopK(candidates=train_user.batch(128).map(lambda x, y: activity_model(x)))
+                     ]
         )
 
     def get_config(self):
@@ -224,8 +245,8 @@ class ActivityRecommenderModel(tfrs.models.Model):
 
         user_embeddings = self.user_model(common_features)[:, None]
         activity_embeddings = self.activity_model(common_features)[:, None]
-        concat = tf.concat([user_embeddings, activity_embeddings], axis=-1)  # [64, 1, 160]
-        recommendations = tf.sigmoid(tf.reduce_sum(concat, axis=-1))
+        attention = self.attention_layer([user_embeddings, activity_embeddings])
+        recommendations = self.dense_layer(attention)
 
         if not training:  # Only apply this logic during inference
             # Check if all grades are below 3
@@ -273,6 +294,7 @@ activity_model = ActivityModel()
 print("Compiling the UserModel...")
 user_model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
                    loss=tf.keras.losses.MeanSquaredError())
+
 print("Training UserModel...")
 user_model.fit(train_user, epochs=10, validation_data=test_user)
 print("UserModel training complete.")
@@ -309,7 +331,7 @@ print("Evaluation complete.")
 print(f"Evaluation Results: {evaluation_results}")
 
 # Save the model
-print("Saving the ActivityRecommenderModel...")
+print("Saving the model...")
 model.save('TFRS_LTSM_model', save_format='tf', save_traces=True)
 print("Model saved. Done!")
 
