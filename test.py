@@ -1,6 +1,7 @@
 import numpy as np
 import tensorflow as tf
 import pandas as pd
+from dummy_data_for_test import generate_and_save_calendar_data
 
 print(tf.__version__)
 
@@ -9,12 +10,14 @@ loaded_model = tf.keras.models.load_model('TFRS_LTSM_model')
 print("Model loaded successfully.")
 
 print("Loading CSV file...")
-df = pd.read_csv('enhanced_realistic_calendar_data.csv')
+df = generate_and_save_calendar_data()
 print(f"Loaded {len(df)} records from the CSV file.\n")
 print("First few rows of the dataset:\n", df.head())
 
 df['suggestion'] = 0
 df['grade'] = 0
+
+
 
 # Assuming df is your DataFrame for inference
 print("Preprocessing datetime columns...")
@@ -24,6 +27,12 @@ df["endTime"] = pd.to_datetime(df["endTime"])
 print("Converting datetime to timestamps...")
 df['startTime'] = df['startTime'].apply(lambda x: x.timestamp())
 df['endTime'] = df['endTime'].apply(lambda x: x.timestamp())
+
+# Get unique activity titles
+unique_activity_titles = df["title"].unique().tolist()
+
+# Get unique locations
+unique_locations = df["location"].unique().tolist()
 
 # Convert the DataFrame to a TensorFlow Dataset
 print("Converting DataFrame to TensorFlow Dataset...")
