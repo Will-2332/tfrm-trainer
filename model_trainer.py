@@ -3,7 +3,7 @@ import tensorflow as tf
 import tensorflow_recommenders as tfrs
 import numpy as np
 from sklearn.model_selection import train_test_split
-from tensorflow_recommenders.metrics import FactorizedTopK
+from dummy_data_for_test import generate_and_save_calendar_data
 
 # Check TensorFlow version and available GPUs
 print("TensorFlow Version:", tf.__version__)
@@ -11,7 +11,8 @@ print("Available GPUs:", tf.config.list_physical_devices('GPU'))
 
 # Load the data
 print("Loading data...")
-df = pd.read_csv('dummy_calendar_data.csv')
+# df = pd.read_csv('dummy_calendar_data.csv')
+df = generate_and_save_calendar_data()
 
 # Display basic information about the loaded data
 print(f"Total number of samples: {len(df)}")
@@ -82,19 +83,22 @@ for features, label in test_user.take(1):
     for key, value in features.items():
         print(f"{key}: {value.shape}")
 
-# For the main training set
+# For the ActivityModel training set
 train = train.shuffle(buffer_size=len(train))
 train = train.batch(64, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
 
-# For the main test set
+# For the ActivityModel test set
+test = test.shuffle(buffer_size=len(test))
 test = test.batch(64, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
 
-# For the user-specific training set
+# For the UserModel training set
 train_user = train_user.shuffle(buffer_size=len(train_user))
 train_user = train_user.batch(64, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
 
-# For the user-specific test set
+# For the UserModel test set
+test_user = test_user.shuffle(buffer_size=len(test_user))
 test_user = test_user.batch(64, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+
 # Cache datasets
 print("Caching datasets...")
 cached_train = train.cache()
@@ -143,8 +147,12 @@ class UserModel(tf.keras.Model):
         self.location_embedding = tf.keras.layers.Embedding(len(unique_locations) + 2, 32)
         self.startTime_embedding = tf.keras.layers.Embedding(input_dim=24, output_dim=16)
         self.endTime_embedding = tf.keras.layers.Embedding(input_dim=24, output_dim=16)
-        self.flatten = tf.keras.layers.Flatten()
         self.lstm = tf.keras.layers.LSTM(64, return_sequences=True)
+        self.fc1 = tf.keras.layers.Dense(128, activation='relu',
+                                         kernel_regularizer=tf.keras.regularizers.l1(0.01))
+        self.dropout = tf.keras.layers.Dropout(0.5)
+        self.fc2 = tf.keras.layers.Dense(64, activation=tf.keras.layers.LeakyReLU(),
+                                         kernel_regularizer=tf.keras.regularizers.l2(0.01))
 
     def get_config(self):
         return {
@@ -158,24 +166,31 @@ class UserModel(tf.keras.Model):
         endTime_indices = tf.cast(inputs["endTime"] % (60 * 60 * 24) // (60 * 60), tf.int32)
         location_indices = self.location_lookup(inputs["location"])
         location_embeddings = self.location_embedding(location_indices)
+        grade_embed = tf.expand_dims(inputs["grade"], axis=-1)
+        grade_embed = tf.cast(grade_embed, dtype=tf.float32)
 
         embeddings = tf.concat([
             self.title_embedding(title_indices),
             self.startTime_embedding(startTime_indices),
             self.endTime_embedding(endTime_indices),
+            grade_embed,
             location_embeddings,
         ], axis=-1)
 
         # Sort by startTime
         sorted_indices = tf.argsort(startTime_indices, axis=-1, direction='ASCENDING')
         sorted_embeddings = tf.gather(embeddings, sorted_indices)
-
         sorted_embeddings = tf.expand_dims(sorted_embeddings, 1)
 
         # Pass through LSTM
         lstm_output = self.lstm(sorted_embeddings)
 
-        return self.flatten(lstm_output)
+        # Denser layers
+        x1 = self.fc1(lstm_output)
+        x2 = self.dropout(x1)
+        output = self.fc2(x2)
+
+        return output
 
 
 class ActivityModel(tf.keras.Model):
@@ -191,6 +206,15 @@ class ActivityModel(tf.keras.Model):
                                                                                        mask_token=None,
                                                                                        oov_token="UNKNOWN")
         self.location_embedding = tf.keras.layers.Embedding(len(unique_locations) + 2, 31)
+        self.startTime_embedding = tf.keras.layers.Embedding(input_dim=24, output_dim=16)
+        self.endTime_embedding = tf.keras.layers.Embedding(input_dim=24, output_dim=16)
+        self.fc1 = tf.keras.layers.Dense(128, activation='relu',
+                                         kernel_regularizer=tf.keras.regularizers.l1(0.01))
+        self.dropout = tf.keras.layers.Dropout(0.5)
+        self.fc2 = tf.keras.layers.Dense(64, activation=tf.keras.layers.LeakyReLU(),
+                                         kernel_regularizer=tf.keras.regularizers.l2(0.01))
+        self.batch_norm = tf.keras.layers.BatchNormalization()
+        self.output_layer = tf.keras.layers.Dense(1, activation='sigmoid')
 
     def get_config(self):
         return {
@@ -203,35 +227,56 @@ class ActivityModel(tf.keras.Model):
         title_embed = self.title_embedding(title)
         grade_embed = tf.expand_dims(inputs["grade"], axis=-1)
         grade_embed = tf.cast(grade_embed, dtype=tf.float32)
+        startTime_indices = tf.cast(inputs["startTime"] % (60 * 60 * 24) // (60 * 60), tf.int32)
+        endTime_indices = tf.cast(inputs["endTime"] % (60 * 60 * 24) // (60 * 60), tf.int32)
         location_indices = self.location_lookup(inputs["location"])
         location_embeddings = self.location_embedding(location_indices)
 
-        embeddings = tf.concat([title_embed, grade_embed, location_embeddings], axis=-1)
+        embeddings = tf.concat([title_embed,
+                                grade_embed,
+                                location_embeddings,
+                                self.startTime_embedding(startTime_indices),
+                                self.endTime_embedding(endTime_indices)
+                                ], axis=-1)
 
-        return embeddings
+        # Denser layers
+        x1 = self.fc1(embeddings)
+        x2 = self.dropout(x1)
+        x3 = self.fc2(x2)
+        x4 = self.batch_norm(x3)
+        output = self.output_layer(x4)
+
+        return output
 
 
 # ActivityRecommenderModel now accepts pre-trained UserModel and ActivityModel
 class ActivityRecommenderModel(tfrs.models.Model):
 
-    def __init__(self, user_model, activity_model, default_suggestions, confidence_threshold=0.75):
+    def __init__(self, user_model, activity_model, default_suggestions):
         print("Initializing ActivityRecommenderModel...")
         super().__init__()
         self.user_model = user_model  # Now accepts a pre-trained UserModel
         self.activity_model = activity_model  # Now accepts a pre-trained ActivityModel
         self.default_suggestions = tf.constant(default_suggestions, dtype=tf.float32)
-        self.confidence_threshold = confidence_threshold
         self.attention_layer = tf.keras.layers.Attention(use_scale=True)
         self.dense_layer = tf.keras.layers.Dense(64, activation='relu')
+        self.dropout1 = tf.keras.layers.Dropout(0.5)
+        self.fc1 = tf.keras.layers.Dense(64, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01))
+        self.attention_layer_user = tf.keras.layers.Attention(use_scale=True)
+        self.dropout2 = tf.keras.layers.Dropout(0.5)
+        self.fc2 = tf.keras.layers.Dense(64, activation=tf.keras.layers.LeakyReLU(),
+                                         kernel_regularizer=tf.keras.regularizers.l1(0.01))
+        self.user_projection_layer = tf.keras.layers.Dense(64, activation=None)
+        self.activity_projection_layer = tf.keras.layers.Dense(64, activation=None)
+
+
         self.task = tfrs.tasks.Ranking(
-            metrics=[tf.keras.metrics.MeanAbsoluteError()
-                     # ,FactorizedTopK(candidates=train_user.batch(128).map(lambda x, y: activity_model(x)))
-                     ]
+            loss=tf.keras.losses.MeanAbsoluteError(),
+            metrics=[tf.keras.metrics.MeanSquaredError()]
         )
 
     def get_config(self):
-        return {"default_suggestions": self.default_suggestions.numpy().tolist(),
-                "confidence_threshold": self.confidence_threshold}
+        return {"default_suggestions": self.default_suggestions.numpy().tolist()}
 
     def call(self, inputs, training=True):
         # Common features for both user and activity models
@@ -243,10 +288,17 @@ class ActivityRecommenderModel(tfrs.models.Model):
             "grade": inputs["grade"]
         }
 
-        user_embeddings = self.user_model(common_features)[:, None]
-        activity_embeddings = self.activity_model(common_features)[:, None]
+        user_embeddings_original = self.user_model(common_features)[:, None]
+        activity_embeddings_original = self.activity_model(common_features)[:, None]
+        user_embeddings = self.user_projection_layer(user_embeddings_original)
+        activity_embeddings = self.activity_projection_layer(activity_embeddings_original)
         attention = self.attention_layer([user_embeddings, activity_embeddings])
-        recommendations = self.dense_layer(attention)
+        x1 = self.dropout1(attention)
+        x2 = self.fc1(x1)
+        attention_user = self.attention_layer_user([user_embeddings, x2])
+        x3 = self.dropout2(attention_user)
+        output = self.fc2(x3)
+        recommendations = self.dense_layer(output)
 
         if not training:  # Only apply this logic during inference
             # Check if all grades are below 3
@@ -255,24 +307,14 @@ class ActivityRecommenderModel(tfrs.models.Model):
             # Check if dataset is empty
             is_dataset_empty = tf.equal(tf.size(inputs['grade']), 0)
 
-            # Calculate mean recommendations
-            mean_recommendations = tf.reduce_mean(recommendations)
-
             def true_fn():
                 return self.default_suggestions
-
-            def false_fn():
-                return tf.cond(
-                    mean_recommendations < self.confidence_threshold,
-                    lambda: self.default_suggestions,
-                    lambda: recommendations
-                )
 
             # Apply conditions
             final_recommendations = tf.case([
                 (all_grades_below_3, true_fn),
                 (is_dataset_empty, true_fn),
-            ], default=false_fn)
+            ], default=lambda: recommendations)
 
             return final_recommendations
 
@@ -280,7 +322,6 @@ class ActivityRecommenderModel(tfrs.models.Model):
             return recommendations  # Existing logic during training
 
     def compute_loss(self, inputs, training=True):
-        print("Computing loss...")
         features, targets = inputs
         predictions = self(features, training=training)
         return self.task(targets, predictions)
@@ -310,12 +351,12 @@ print("ActivityModel training complete.")
 
 # Instantiate and compile the ActivityRecommenderModel
 print("Compiling the ActivityRecommenderModel...")
-model = ActivityRecommenderModel(user_model, activity_model, default_suggestions, confidence_threshold=0.75)
+model = ActivityRecommenderModel(user_model, activity_model, default_suggestions)
 model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4))
 print("ActivityRecommenderModel compiled.")
 
 # Add early stopping
-early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=2)
+early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_total_loss', patience=3)
 
 # Train the model
 print("Starting training of ActivityRecommenderModel...")
@@ -329,6 +370,8 @@ print("Evaluation complete.")
 
 # Print evaluation results
 print(f"Evaluation Results: {evaluation_results}")
+
+model.summary()
 
 # Save the model
 print("Saving the model...")

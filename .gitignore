@@ -163,3 +163,4 @@ TFRS_LTSM_model/
 .TFRS_LSTM_model/
 dummy_calendar_data.csv
 enhanced_realistic_calendar_data.csv
+examples/

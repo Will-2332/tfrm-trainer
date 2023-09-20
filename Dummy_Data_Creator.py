@@ -87,7 +87,7 @@ def generate_data_chunk(start, end):
 
 
 if __name__ == "__main__":
-    num_samples = 1000
+    num_samples = 5000
     num_workers = 16
     chunk_size = num_samples // num_workers
 

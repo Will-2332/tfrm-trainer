@@ -1,9 +1,10 @@
 import pandas as pd
 import tensorflow as tf
 import numpy as np
+from dummy_data_for_test import generate_and_save_calendar_data
 
 print("Loading CSV file...")
-df = pd.read_csv('enhanced_realistic_calendar_data.csv')
+df = generate_and_save_calendar_data()
 print(f"Loaded {len(df)} records from the CSV file.\n")
 print("First few rows of the dataset:\n", df.head())
 
@@ -21,6 +22,8 @@ print("Loading the saved model...")
 model = tf.keras.models.load_model('TFRS_LTSM_model')
 
 df = preprocess_data(df)
+unique_activity_titles = df["title"].unique().tolist()
+unique_locations = df["location"].unique().tolist()
 
 df_dict = {name: np.array(value) for name, value in df.items() if name != "suggestion"}
 dataset_for_prediction = tf.data.Dataset.from_tensor_slices(df_dict)
@@ -41,7 +44,7 @@ def run_inference(dataset_for_prediction, model):
                     "startTime": pd.to_datetime(batch["startTime"].numpy()[i], unit='s'),
                     "endTime": pd.to_datetime(batch["endTime"].numpy()[i], unit='s'),
                     "location": batch["location"].numpy()[i],
-                    "probability": pred
+                    "score": pred  # This is a ranking score, not a probability
                 })
         if not predictions:
             print("Warning: No recommendations made by the model.")
@@ -53,11 +56,12 @@ run_inference(dataset_for_prediction, model)
 if not predictions:
     print("No recommendations made by the model.")
 else:
-    sorted_predictions = sorted(predictions, key=lambda x: x["probability"], reverse=True)
-    print("\nTop Predictions with Highest Probability of Happening:")
+    sorted_predictions = sorted(predictions, key=lambda x: x["score"], reverse=True)  # Sort by score
+    print("\nTop Predictions with Highest Scores:")
     for i, pred in enumerate(sorted_predictions[:10]):
         print(
             f"Sample {i + 1}: Title: {pred['title']}, Start Time: {pred['startTime']}, End Time: {pred['endTime']}"
-            f", Location: {pred['location']}, Probability: {pred['probability'] * 100:.2f}%")
+            f", Location: {pred['location']}, Score: {pred['score']}"
+        )
 
 print("Done!")
