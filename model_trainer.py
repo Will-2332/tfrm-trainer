@@ -11,8 +11,7 @@ print("Available GPUs:", tf.config.list_physical_devices('GPU'))
 
 # Load the data
 print("Loading data...")
-# df = pd.read_csv('dummy_calendar_data.csv')
-df = generate_and_save_calendar_data()
+df = pd.read_csv('dummy_calendar_data.csv')
 
 # Display basic information about the loaded data
 print(f"Total number of samples: {len(df)}")
@@ -271,8 +270,8 @@ class ActivityRecommenderModel(tfrs.models.Model):
 
 
         self.task = tfrs.tasks.Ranking(
-            loss=tf.keras.losses.MeanAbsoluteError(),
-            metrics=[tf.keras.metrics.MeanSquaredError()]
+            loss=tf.keras.losses.MeanSquaredError(),
+            metrics=[tf.keras.metrics.MeanAbsoluteError()]
         )
 
     def get_config(self):
